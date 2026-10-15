@@ -75,51 +75,87 @@ def format_time_simple(seconds):
         return f"{h:02d}:{m:02d}:{s:02d}"
     return f"{m:02d}:{s:02d}"
 
+def get_yt_dlp_base_cmd(ignore_ssl_flag=True):
+    cmd = [
+        sys.executable, "-m", "yt_dlp",
+        "--no-playlist",
+        "--extractor-args", "youtube:player-client=android,web,tv,ios,mweb",
+        "--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
+    ]
+    # Detecta automaticamente se existe runtime JavaScript instalado (Node, Nodejs ou Deno)
+    node_bin = shutil.which("node") or shutil.which("nodejs")
+    deno_bin = shutil.which("deno")
+    if node_bin:
+        cmd.extend(["--js-runtimes", f"node:{node_bin}"])
+    elif deno_bin:
+        cmd.extend(["--js-runtimes", f"deno:{deno_bin}"])
+
+    if ignore_ssl_flag:
+        cmd.append("--no-check-certificates")
+    return cmd
+
 def download_full_video(video_url, temp_dir, ignore_ssl_flag):
     raw_path = os.path.join(temp_dir, "video_base.mp4")
-    cmd = [
-        sys.executable, "-m", "yt_dlp",
-        "--js-runtimes", "node",
-        "--no-playlist",
-        "-o", raw_path
+    cmd = get_yt_dlp_base_cmd(ignore_ssl_flag) + [
+        "-f", "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
+        "--merge-output-format", "mp4",
+        "-o", raw_path,
+        video_url
     ]
-    if ignore_ssl_flag:
-        cmd.append("--no-check-certificates")
-    cmd.append(video_url)
-    
     res = subprocess.run(cmd, capture_output=True, text=True)
-    downloaded = [os.path.join(temp_dir, f) for f in os.listdir(temp_dir) if f.startswith("video_base")]
+    downloaded = [os.path.join(temp_dir, f) for f in os.listdir(temp_dir) if f.startswith("video_base") and os.path.getsize(os.path.join(temp_dir, f)) > 0]
+    
     if not downloaded:
-        raise Exception(f"Erro ao baixar vídeo do YouTube:\n{res.stderr}")
+        # Fallback para formato único compatível caso o merge falhe
+        fallback_cmd = get_yt_dlp_base_cmd(ignore_ssl_flag) + [
+            "-f", "best[ext=mp4]/b",
+            "-o", raw_path,
+            video_url
+        ]
+        subprocess.run(fallback_cmd, capture_output=True, text=True)
+        downloaded = [os.path.join(temp_dir, f) for f in os.listdir(temp_dir) if f.startswith("video_base") and os.path.getsize(os.path.join(temp_dir, f)) > 0]
+        
+        if not downloaded:
+            err_msg = res.stderr.strip() or res.stdout.strip()
+            raise Exception(f"Erro ao baixar vídeo do YouTube:\n{err_msg}")
+            
     return downloaded[0]
 
-def get_audio_and_transcribe(video_url, temp_dir, model_name, ignore_ssl_flag):
-    audio_path = os.path.join(temp_dir, "audio.mp3")
-    
-    cmd = [
-        sys.executable, "-m", "yt_dlp",
-        "-x", "--audio-format", "mp3",
-        "--no-playlist",
-        "-o", audio_path
-    ]
-    if ignore_ssl_flag:
-        cmd.append("--no-check-certificates")
-    cmd.append(video_url)
-    
-    res = subprocess.run(cmd, capture_output=True, text=True)
-    if not os.path.exists(audio_path):
-        raise Exception(f"Erro ao baixar áudio do YouTube:\n{res.stderr}")
-    
-    # Converter áudio para WAV 16kHz Mono (formato nativo ideal do Whisper)
+def get_audio_and_transcribe(video_source, temp_dir, model_name, ignore_ssl_flag=True):
     wav_16k_path = os.path.join(temp_dir, "audio_16k.wav")
-    subprocess.run([
-        "ffmpeg", "-y",
-        "-i", audio_path,
-        "-ar", "16000",
-        "-ac", "1",
-        "-c:a", "pcm_s16le",
-        wav_16k_path
-    ], capture_output=True, text=True, check=True)
+    
+    # Se já é um arquivo local baixado, extrai áudio diretamente com FFmpeg (sem requisição de rede!)
+    if os.path.exists(video_source):
+        subprocess.run([
+            "ffmpeg", "-y",
+            "-i", video_source,
+            "-vn",
+            "-ar", "16000",
+            "-ac", "1",
+            "-c:a", "pcm_s16le",
+            wav_16k_path
+        ], capture_output=True, text=True, check=True)
+    else:
+        # Se for uma URL, baixa o áudio com yt-dlp usando clients móveis
+        audio_path = os.path.join(temp_dir, "audio.mp3")
+        cmd = get_yt_dlp_base_cmd(ignore_ssl_flag) + [
+            "-x", "--audio-format", "mp3",
+            "-o", audio_path,
+            video_source
+        ]
+        res = subprocess.run(cmd, capture_output=True, text=True)
+        if not os.path.exists(audio_path):
+            raise Exception(f"Erro ao baixar áudio do YouTube:\n{res.stderr or res.stdout}")
+        
+        subprocess.run([
+            "ffmpeg", "-y",
+            "-i", audio_path,
+            "-vn",
+            "-ar", "16000",
+            "-ac", "1",
+            "-c:a", "pcm_s16le",
+            wav_16k_path
+        ], capture_output=True, text=True, check=True)
     
     from faster_whisper import WhisperModel
     model = WhisperModel(model_name, device="cpu", compute_type="int8")
@@ -230,7 +266,7 @@ with tab1:
                     st.session_state.local_video_path = base_video
                     
                     status.write("🧠 Gerando transcrição em Português com IA...")
-                    segments = get_audio_and_transcribe(url, temp_dir, whisper_model_size, ignore_ssl)
+                    segments = get_audio_and_transcribe(base_video, temp_dir, whisper_model_size, ignore_ssl)
                     
                     status.write("✂️ Identificando os melhores momentos...")
                     clips = find_best_clips(segments)
