@@ -79,7 +79,7 @@ def get_yt_dlp_base_cmd(ignore_ssl_flag=True):
     cmd = [
         sys.executable, "-m", "yt_dlp",
         "--no-playlist",
-        "--extractor-args", "youtube:player-client=android,web,tv,ios,mweb",
+        "--extractor-args", "youtube:player-client=visionos,tv,web_embedded,web",
         "--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
     ]
     # Detecta automaticamente se existe runtime JavaScript instalado (Node, Nodejs ou Deno)
@@ -97,7 +97,7 @@ def get_yt_dlp_base_cmd(ignore_ssl_flag=True):
 def download_full_video(video_url, temp_dir, ignore_ssl_flag):
     raw_path = os.path.join(temp_dir, "video_base.mp4")
     cmd = get_yt_dlp_base_cmd(ignore_ssl_flag) + [
-        "-f", "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
+        "-f", "bv*[ext=mp4]+ba[ext=m4a]/bv*+ba/b",
         "--merge-output-format", "mp4",
         "-o", raw_path,
         video_url
@@ -108,7 +108,7 @@ def download_full_video(video_url, temp_dir, ignore_ssl_flag):
     if not downloaded:
         # Fallback para formato único compatível caso o merge falhe
         fallback_cmd = get_yt_dlp_base_cmd(ignore_ssl_flag) + [
-            "-f", "best[ext=mp4]/b",
+            "-f", "b/best",
             "-o", raw_path,
             video_url
         ]
