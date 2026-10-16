@@ -57,7 +57,14 @@ subtitle_color = st.sidebar.selectbox("🎨 Cor da Legenda:", options=["Amarela 
 ignore_ssl = st.sidebar.checkbox("🔒 Ignorar SSL (Proxy/VPN)", value=True)
 whisper_model_size = st.sidebar.selectbox("🧠 Modelo de IA para Transcrição (pt-BR):", options=["base", "small", "medium"], index=1, help="O modelo 'small' oferece alta precisão para Português do Brasil.")
 
-url = st.text_input("🔗 Link do vídeo do YouTube:", placeholder="https://www.youtube.com/watch?v=...")
+with st.sidebar.expander("🍪 Cookies do YouTube (Opcional - Para vídeos restritos)"):
+    cookies_input = st.text_area("Cole seu cookies.txt aqui:", height=70, help="Gere um cookies.txt com a extensão 'Get cookies.txt LOCALLY' no Chrome/Firefox.")
+
+col_v1, col_v2 = st.columns([1.6, 1.4])
+with col_v1:
+    url = st.text_input("🔗 Link do vídeo do YouTube:", placeholder="https://www.youtube.com/watch?v=...")
+with col_v2:
+    uploaded_file = st.file_uploader("📁 Ou envie um arquivo (.mp4/.mov):", type=["mp4", "mov", "mkv"])
 
 def format_time_hms(seconds):
     td = timedelta(seconds=float(seconds))
@@ -75,10 +82,11 @@ def format_time_simple(seconds):
         return f"{h:02d}:{m:02d}:{s:02d}"
     return f"{m:02d}:{s:02d}"
 
-def get_yt_dlp_base_cmd(ignore_ssl_flag=True):
+def get_yt_dlp_base_cmd(ignore_ssl_flag=True, cookies_path=None):
     cmd = [
         sys.executable, "-m", "yt_dlp",
         "--no-playlist",
+        "--remote-components", "ejs:github",
         "--extractor-args", "youtube:player-client=visionos,tv,web_embedded,web",
         "--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
     ]
@@ -90,13 +98,16 @@ def get_yt_dlp_base_cmd(ignore_ssl_flag=True):
     elif deno_bin:
         cmd.extend(["--js-runtimes", f"deno:{deno_bin}"])
 
+    if cookies_path and os.path.exists(cookies_path):
+        cmd.extend(["--cookies", cookies_path])
+
     if ignore_ssl_flag:
         cmd.append("--no-check-certificates")
     return cmd
 
-def download_full_video(video_url, temp_dir, ignore_ssl_flag):
+def download_full_video(video_url, temp_dir, ignore_ssl_flag, cookies_path=None):
     raw_path = os.path.join(temp_dir, "video_base.mp4")
-    cmd = get_yt_dlp_base_cmd(ignore_ssl_flag) + [
+    cmd = get_yt_dlp_base_cmd(ignore_ssl_flag, cookies_path) + [
         "-f", "bv*[ext=mp4]+ba[ext=m4a]/bv*+ba/b",
         "--merge-output-format", "mp4",
         "-o", raw_path,
@@ -106,20 +117,54 @@ def download_full_video(video_url, temp_dir, ignore_ssl_flag):
     downloaded = [os.path.join(temp_dir, f) for f in os.listdir(temp_dir) if f.startswith("video_base") and os.path.getsize(os.path.join(temp_dir, f)) > 0]
     
     if not downloaded:
-        # Fallback para formato único compatível caso o merge falhe
-        fallback_cmd = get_yt_dlp_base_cmd(ignore_ssl_flag) + [
+        # Fallback 1: formato único direto
+        fallback_cmd1 = get_yt_dlp_base_cmd(ignore_ssl_flag, cookies_path) + [
             "-f", "b/best",
             "-o", raw_path,
             video_url
         ]
-        subprocess.run(fallback_cmd, capture_output=True, text=True)
+        subprocess.run(fallback_cmd1, capture_output=True, text=True)
         downloaded = [os.path.join(temp_dir, f) for f in os.listdir(temp_dir) if f.startswith("video_base") and os.path.getsize(os.path.join(temp_dir, f)) > 0]
         
-        if not downloaded:
-            err_msg = res.stderr.strip() or res.stdout.strip()
-            raise Exception(f"Erro ao baixar vídeo do YouTube:\n{err_msg}")
-            
+    if not downloaded:
+        # Fallback 2: fallback web puro com remote ejs
+        fallback_cmd2 = [
+            sys.executable, "-m", "yt_dlp",
+            "--no-playlist",
+            "--remote-components", "ejs:github",
+            "-f", "best",
+            "-o", raw_path,
+            video_url
+        ]
+        if ignore_ssl_flag:
+            fallback_cmd2.append("--no-check-certificates")
+        if cookies_path and os.path.exists(cookies_path):
+            fallback_cmd2.extend(["--cookies", cookies_path])
+        subprocess.run(fallback_cmd2, capture_output=True, text=True)
+        downloaded = [os.path.join(temp_dir, f) for f in os.listdir(temp_dir) if f.startswith("video_base") and os.path.getsize(os.path.join(temp_dir, f)) > 0]
+
+    if not downloaded:
+        err_msg = res.stderr.strip() or res.stdout.strip()
+        raise Exception(f"Erro ao baixar vídeo do YouTube:\n{err_msg}")
+        
     return downloaded[0]
+
+def prepare_input_video(temp_dir):
+    cookies_file = None
+    if cookies_input.strip():
+        cookies_file = os.path.join(temp_dir, "cookies.txt")
+        with open(cookies_file, "w", encoding="utf-8") as cf:
+            cf.write(cookies_input.strip())
+            
+    if uploaded_file is not None:
+        save_path = os.path.join(temp_dir, "video_base.mp4")
+        with open(save_path, "wb") as f_up:
+            f_up.write(uploaded_file.getbuffer())
+        return save_path
+    elif url.strip():
+        return download_full_video(url.strip(), temp_dir, ignore_ssl, cookies_file)
+    else:
+        return None
 
 def get_audio_and_transcribe(video_source, temp_dir, model_name, ignore_ssl_flag=True):
     wav_16k_path = os.path.join(temp_dir, "audio_16k.wav")
@@ -254,15 +299,16 @@ with tab1:
     st.subheader("1. Analisar Vídeo e Encontrar os Melhores Momentos")
     
     if st.button("🔍 Analisar Vídeo com IA", type="primary"):
-        if not url.strip():
-            st.error("Por favor, insira uma URL válida do YouTube.")
+        current_id = url.strip() if url.strip() else (uploaded_file.name if uploaded_file else "")
+        if not current_id:
+            st.error("Por favor, insira uma URL válida do YouTube ou envie um arquivo de vídeo (.mp4).")
         else:
             with st.status("Analisando o vídeo com IA...", expanded=True) as status:
                 try:
                     temp_dir = tempfile.mkdtemp()
                     
-                    status.write("📥 Baixando vídeo completo do YouTube...")
-                    base_video = download_full_video(url, temp_dir, ignore_ssl)
+                    status.write("📥 Preparando vídeo para análise...")
+                    base_video = prepare_input_video(temp_dir)
                     st.session_state.local_video_path = base_video
                     
                     status.write("🧠 Gerando transcrição em Português com IA...")
@@ -273,7 +319,7 @@ with tab1:
                     
                     st.session_state.segments = segments
                     st.session_state.clips = clips
-                    st.session_state.analyzed_url = url
+                    st.session_state.analyzed_url = current_id
                     st.session_state.generated_clips = {}
                     
                     status.update(label="Análise concluída com sucesso!", state="complete", expanded=False)
@@ -282,7 +328,8 @@ with tab1:
                     status.update(label="Erro na análise", state="error")
                     st.error(f"Erro ao analisar o vídeo: {str(e)}")
 
-    if st.session_state.clips and st.session_state.analyzed_url == url:
+    current_id = url.strip() if url.strip() else (uploaded_file.name if uploaded_file else "")
+    if st.session_state.clips and st.session_state.analyzed_url == current_id:
         st.subheader("2. Escolha o Clipe que Deseja Gerar")
         
         for idx, clip in enumerate(st.session_state.clips):
@@ -314,10 +361,10 @@ with tab1:
                                 "text": edited_text.strip()
                             }]
                         
-                        # Garantir vídeo base baixado
+                        # Garantir vídeo base disponível
                         if not st.session_state.local_video_path or not os.path.exists(st.session_state.local_video_path):
-                            clip_status.write("📥 Baixando vídeo base...")
-                            st.session_state.local_video_path = download_full_video(url, temp_dir, ignore_ssl)
+                            clip_status.write("📥 Preparando vídeo base...")
+                            st.session_state.local_video_path = prepare_input_video(temp_dir)
                         
                         src_video = st.session_state.local_video_path
                         
@@ -417,16 +464,17 @@ with tab2:
         m_end = st.text_input("⏱️ Tempo Final (ex: 00:01:30):", value="00:00:40")
 
     if st.button("✂️ Cortar Trecho Manual", type="primary"):
-        if not url.strip():
-            st.error("Por favor, insira uma URL do YouTube.")
+        current_id_m = url.strip() if url.strip() else (uploaded_file.name if uploaded_file else "")
+        if not current_id_m:
+            st.error("Por favor, insira uma URL do YouTube ou envie um arquivo de vídeo.")
         else:
             with st.status("Gerando corte manual...", expanded=True) as m_status:
                 try:
                     temp_dir = tempfile.mkdtemp()
                     out_final = os.path.join(OUTPUT_DIR, "corte_manual.mp4")
                     
-                    m_status.write("📥 Baixando vídeo...")
-                    base_video = download_full_video(url, temp_dir, ignore_ssl)
+                    m_status.write("📥 Preparando vídeo...")
+                    base_video = prepare_input_video(temp_dir)
                     
                     temp_src = os.path.join(temp_dir, "input_base.mp4")
                     shutil.copy(base_video, temp_src)
